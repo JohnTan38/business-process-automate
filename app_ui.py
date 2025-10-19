@@ -10,6 +10,9 @@ from selenium.webdriver.chrome.service import Service
 import time
 import os
 import subprocess
+import shutil
+import argparse
+import sys
 
 def create_driver():
     options = webdriver.ChromeOptions()
@@ -20,11 +23,11 @@ def create_driver():
 
 def login_esker(driver):
     #driver = webdriver.Chrome()
-    driver.get("https://az3.ondemand.e@@@r.com/ondemand/webaccess/asf/home.aspx")
+    driver.get("https://az3.ondemand.e***r.com/ondemand/webaccess/asf/home.aspx")
     driver.maximize_window()
     time.sleep(1)
 
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("YOUR_EMAIL")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@abc.com")
     driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("YOUR_PASSWORD")
     driver.find_element(By.XPATH, '//*[@id="ctl03_btnSubmitLogin"]').click()
     time.sleep(2)
@@ -184,19 +187,41 @@ def load_vendor_updates_from_json(json_path: Path) -> pd.DataFrame:
 
 
 def load_latest_vendor_json(json_dir: Path) -> pd.DataFrame:
-    """Return the most recent vendor JSON payload inside the provided directory."""
-    json_files = [path for path in json_dir.glob("*.json") if path.is_file()]
+    """
+    Return the newest parsable vendor JSON payload inside the provided directory.
+
+    The environment variable `ESKER_VENDOR_JSON_PATTERN` can be used to narrow the
+    filenames (e.g. ``vendor_*.json``). Files that do not match the expected schema
+    are skipped rather than causing the workflow to abort.
+    """
+    pattern = os.getenv("ESKER_VENDOR_JSON_PATTERN")
+    candidates = json_dir.glob(pattern) if pattern else json_dir.glob("*.json")
+    json_files = sorted(
+        (path for path in candidates if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
     if not json_files:
         raise FileNotFoundError(f"No JSON files found in {json_dir}")
 
-    latest_json = max(json_files, key=lambda path: path.stat().st_mtime)
-    return load_vendor_updates_from_json(latest_json)
+    errors: list[str] = []
+    for json_path in json_files:
+        try:
+            return load_vendor_updates_from_json(json_path)
+        except ValueError as exc:
+            errors.append(f"{json_path.name}: {exc}")
+
+    raise ValueError(
+        "Unable to parse any JSON payloads in "
+        f"{json_dir}. Encountered: {', '.join(errors)}"
+    )
 
 def create_log_file(path):
     """
     Checks if a log file exists at the specified path.
     If not, creates a new one with the current date and time.
     """
+    os.makedirs(path, exist_ok=True)
     filename = f"log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
     full_path = os.path.join(path, filename)
 
@@ -205,7 +230,13 @@ def create_log_file(path):
             f.write("")  # Create an empty file
 
     return full_path
+"""
+path_vendor_update = r"C:/Users/john.tan/Documents/power_apps_esker_vendor/esker_vendor_update/"
+log_file = create_log_file(path_vendor_update+'Log/') # Create the log file if it doesn't exist
 
+list_company_code =[]
+list_vendor_number =[]
+"""
 def start_time():
     start_time=datetime.now()
     return start_time
@@ -323,11 +354,7 @@ def vendor_update_process(driver, df_vendor_update):
         list_company_code.append(df_vendor_update.loc[i, 'company_code'])
         list_vendor_number.append(df_vendor_update.loc[i, 'vendor_number'])
         return list_vendor_number
-    
-    #with open(log_file, 'a') as f:  # Open in append mode
-        #f.write(f"Process completed: {datetime.now()}\n")
-        #f.write(f"Updated entities: {', '.join(list_company_code)}\n")
-        #f.write(f"Updated vendor: {str(vendor_number)}\n")
+
     
 def log_entry(log_file,started_time):
     with open(log_file, 'a') as f:  # Open in append mode
@@ -337,18 +364,52 @@ def log_entry(log_file,started_time):
         f.write(f"Updated vendor: {str(list_vendor_number)}\n")
 
 
-def main():
+def _bool_from_env(var_name: str, default: bool = False) -> bool:
+    """Return True if the environment variable is truthy, otherwise False."""
+    raw_value = os.getenv(var_name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() not in {"0", "false", "no", ""}
+
+
+def main(
+    mode: str = "worker",
+    json_dir: Path | str | None = None,
+    log_dir: Path | str | None = None,
+    dry_run: bool | None = None,
+) -> None:
     global list_company_code, list_vendor_number
 
-    json_directory = Path(os.getenv("ESKER_VENDOR_JSON_DIR", r"C:/Users/john.tan/AppData/Local/Temp"))
-    vendor_update = load_latest_vendor_json(json_directory)
-    df_vendor_update = format_vendor_data(vendor_update)
-    path_vendor_update = r"C:/Users/john.tan/Documents/power_apps_esker_vendor/esker_vendor_update/"
-    log_file = create_log_file(path_vendor_update + 'Log/')
+    if mode != "worker":
+        raise ValueError(f"Unsupported mode '{mode}'. Only 'worker' is implemented.")
+
+    if json_dir is None:
+        json_directory = Path(os.getenv("ESKER_VENDOR_JSON_DIR", r"C:/Users/john.tan/Downloads")) #AppData/Local/Temp
+    else:
+        json_directory = Path(json_dir)
+
+    if log_dir is None:
+        log_directory = Path(os.getenv("ESKER_LOG_DIR", r"C:/Users/john.tan/Documents/power_apps_esker_vendor/esker_vendor_update/Log"))
+    else:
+        log_directory = Path(log_dir)
+
+    use_dry_run = dry_run if dry_run is not None else _bool_from_env("ESKER_DRYRUN", default=False)
     list_company_code = []
     list_vendor_number = []
     started_time = start_time()
     print(started_time)
+
+    if use_dry_run:
+        log_file = create_log_file(str(log_directory))
+        print("Dry-run enabled; skipping Selenium automation.")
+        log_entry(log_file, started_time)
+        print("Process completed (dry-run).")
+        time.sleep(1)
+        return
+
+    vendor_update = load_latest_vendor_json(json_directory)
+    df_vendor_update = format_vendor_data(vendor_update)
+    log_file = create_log_file(str(log_directory))
 
     driver = create_driver()
     try:
@@ -375,5 +436,50 @@ def main():
     time.sleep(1)
 
 
+def _main_cli(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Esker vendor update automation entry point.")
+    parser.add_argument(
+        "--mode",
+        choices=["worker"],
+        default="worker",
+        help="Execution mode. Only 'worker' mode is currently supported.",
+    )
+    parser.add_argument(
+        "--json-dir",
+        type=Path,
+        help="Directory containing vendor JSON payloads. Defaults to ESKER_VENDOR_JSON_DIR or the temp directory.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        help="Directory to store execution logs. Defaults to ESKER_LOG_DIR or the vendor update log folder.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Skip Selenium automation and only perform validation/logging.",
+    )
+    parser.add_argument(
+        "--no-dry-run",
+        dest="dry_run",
+        action="store_false",
+        help="Force disable dry-run mode even if the environment variable is set.",
+    )
+    parser.set_defaults(dry_run=None)
+
+    args = parser.parse_args(argv)
+
+    try:
+        main(
+            mode=args.mode,
+            json_dir=args.json_dir,
+            log_dir=args.log_dir,
+            dry_run=args.dry_run,
+        )
+    except Exception as exc:  # pragma: no cover - CLI entry point
+        raise SystemExit(f"Error: {exc}") from exc
+
+
 if __name__ == "__main__":
-    main()
+    _main_cli()

@@ -1,11 +1,14 @@
-# C:\apps\esker\listener.py
+﻿# C:\apps\esker\listener.py
+import os
 import sys
 import time
 import json
 import re
 import shutil
 import tempfile
+import threading
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pythoncom
@@ -14,19 +17,30 @@ import win32com.client
 # --- CONFIG ---
 PYTHON_EXE = sys.executable  # uses current venv/interpreter
 APP_PY     = r"C:/Users/john.tan/esker/Scripts/app.py" # <-- adjust if needed
+APP_UI     = Path(r"C:/Users/john.tan/esker/Scripts/app_ui.py")
+QUEUE_DIR = Path(r"C:/Users/john.tan/esker/queue")
+ARCHIVE_SUCCESS_DIR = Path(r"C:/Users/john.tan/esker/archive/success")
 KEYWORDS   = ["esker vendor email"]         # lower-case match
+
+_executor: ThreadPoolExecutor | None = None
+_executor_lock = threading.Lock()
 
 def subject_hit(subj: str) -> bool:
     s = (subj or "").lower()
     return any(k in s for k in KEYWORDS)
 
 def write_temp_json(data: dict) -> Path:
-    tmp_dir = Path(tempfile.gettempdir())
-    p = tmp_dir / f"esker_{int(time.time())}.json"
+    # Ensure queue exists
+    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    # Monotonic, sortable name: YYYYmmdd_HHMMSS_mmmmmm + ns tail
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    fname = f"{ts}_{time.time_ns()%1_000_000_000:09d}.json"
+    p = QUEUE_DIR / fname
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Optional: keep a backup copy to Downloads as before
     downloads = Path(r"C:/Users/john.tan/Downloads/")
     downloads.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(p, downloads / p.name)  # keep a copy available for other scripts
+    shutil.copy2(p, downloads / p.name)
     return p
 
 
@@ -131,16 +145,80 @@ class InboxEvents:
 
             json_path = write_temp_json(payload)
             # Launch your worker (non-blocking)
-            subprocess.Popen([PYTHON_EXE, APP_PY, "--email_json", str(json_path)])
+            # Queue worker model (Option A): do NOT launch app.py here.
+            # A long-running worker (app_ui.py --mode=worker) will pick this up.
+            # If you want to auto-start the worker when idle, you can add logic here.
 
             # Optional: quick console note
             print(f"[listener] Triggered for: {subj} -> {json_path}")
+
+            enqueue_worker(json_path)
 
         except Exception as e:
             # Minimal error logging to temp
             err_path = Path(tempfile.gettempdir()) / "esker_listener_errors.log"
             with err_path.open("a", encoding="utf-8") as f:
                 f.write(f"{time.ctime()} OnItemAdd error: {e}\n")
+
+
+def enqueue_worker(json_path: Path) -> None:
+    """Queue a JSON payload for processing by the background worker."""
+    print(f"[listener] Queued automation job for {json_path.name}")
+    executor = ensure_worker_executor()
+    executor.submit(worker_task, json_path)
+
+
+def ensure_worker_executor() -> ThreadPoolExecutor:
+    """Return a singleton ThreadPoolExecutor used for automation runs."""
+    global _executor
+    with _executor_lock:
+        if _executor is None:
+            _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="esker-worker")
+        return _executor
+
+
+def worker_task(json_path: Path) -> None:
+    """Wrapper submitted to the executor to run the automation for a payload."""
+    try:
+        run_worker(json_path)
+    except Exception as exc:
+        log_path = Path(tempfile.gettempdir()) / "esker_listener_runner.log"
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"{time.ctime()} worker_task error for {json_path.name}: {exc}\n")
+
+
+def run_worker(json_path: Path) -> None:
+    """Invoke app_ui.py for the provided payload and archive on success."""
+    env = os.environ.copy()
+    env.pop("ESKER_DRYRUN", None)
+    env["ESKER_VENDOR_JSON_DIR"] = str(json_path.parent)
+    env["ESKER_VENDOR_JSON_PATTERN"] = json_path.name
+
+    cmd = [PYTHON_EXE, str(APP_UI), "--mode=worker"]
+    log_path = Path(tempfile.gettempdir()) / "esker_listener_runner.log"
+    print(f"[listener] Starting automation for {json_path.name}")
+    result = subprocess.run(cmd, cwd=str(APP_UI.parent), env=env, capture_output=True, text=True)
+
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(
+            f"{time.ctime()} ran {cmd} for {json_path.name} -> rc={result.returncode}\n"
+        )
+        if result.stdout:
+            log_file.write(f"stdout:\n{result.stdout}\n")
+        if result.stderr:
+            log_file.write(f"stderr:\n{result.stderr}\n")
+
+    if result.returncode == 0:
+        ARCHIVE_SUCCESS_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(json_path, ARCHIVE_SUCCESS_DIR / json_path.name)
+        try:
+            json_path.unlink()
+        except OSError:
+            pass
+        print(f"[listener] Worker completed; archived to {ARCHIVE_SUCCESS_DIR / json_path.name}")
+    else:
+        print(f"[listener] Worker failed for {json_path.name}; see {log_path}")
+
 
 def main():
     # Get Outlook namespace and Inbox folder
@@ -155,7 +233,7 @@ def main():
     # Hook events
     handler = win32com.client.WithEvents(items, InboxEvents)
 
-    print("Listening for new Inbox items… (Ctrl+C to exit)")
+    print("Listening for new Inbox items... (Ctrl+C to exit)")
     # Pump COM messages
     while True:
         pythoncom.PumpWaitingMessages()
