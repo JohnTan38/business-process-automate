@@ -20,7 +20,7 @@ APP_PY     = r"C:/Users/john.tan/esker/Scripts/app.py" # <-- adjust if needed
 APP_UI     = Path(r"C:/Users/john.tan/esker/Scripts/app_ui.py")
 QUEUE_DIR = Path(r"C:/Users/john.tan/esker/queue")
 ARCHIVE_SUCCESS_DIR = Path(r"C:/Users/john.tan/esker/archive/success")
-KEYWORDS   = ["esker vendor email"]         # lower-case match
+KEYWORDS   = ["esker vendor email", "esker gl email"]         # lower-case match
 
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = threading.Lock()

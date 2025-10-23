@@ -23,11 +23,11 @@ def create_driver():
 
 def login_esker(driver):
     #driver = webdriver.Chrome()
-    driver.get("https://az3.ondemand.e***r.com/ondemand/webaccess/asf/home.aspx")
+    driver.get("https://az3.ondemand.e@@@r.com/ondemand/webaccess/asf/home.aspx")
     driver.maximize_window()
     time.sleep(1)
 
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@abc.com")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@EMAIL.com.sg")
     driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("YOUR_PASSWORD")
     driver.find_element(By.XPATH, '//*[@id="ctl03_btnSubmitLogin"]').click()
     time.sleep(2)
@@ -134,21 +134,42 @@ def format_vendor_data(df_vendor_update):
     df_vendor_update.fillna('', inplace=True) # Replace empty or missing values with empty strings
     return df_vendor_update
 
-def load_vendor_updates_from_json(json_path: Path) -> pd.DataFrame:
-    """Read a vendor summary JSON file and return a DataFrame with one row."""
-    with open(json_path, encoding="utf-8") as source:
-        payload = json.load(source)
 
+def format_gl_data(df_gl_update: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise GL payload data so downstream automation receives clean strings.
+    """
+    df_gl_update = df_gl_update.copy()
+    for column in ("account", "coding_block", "company_code", "description"):
+        if column in df_gl_update.columns:
+            df_gl_update[column] = df_gl_update[column].astype(str).str.strip()
+    df_gl_update.fillna("", inplace=True)
+    return df_gl_update
+
+def build_vendor_frame(company_code: str, vendor_number: str, vendor_name: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "company_code": [company_code.strip()],
+            "vendor_number": [vendor_number.strip()],
+            "vendor_name": [vendor_name.strip()],
+        }
+    )
+
+
+def build_frame(account: str, coding_block: str, company_code: str, description: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "account": [account.strip()],
+            "coding_block": [coding_block.strip()],
+            "company_code": [company_code.strip()],
+            "description": [description.strip()],
+        }
+    )
+
+
+def parse_vendor_payload(payload: dict, json_path: Path) -> pd.DataFrame:
+    """Return a DataFrame with vendor details extracted from the payload."""
     pattern = re.compile(r"([A-Za-z0-9]+)\s+(\d+)\s+(.+)")
-
-    def build_frame(company_code: str, vendor_number: str, vendor_name: str) -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "company_code": [company_code.strip()],
-                "vendor_number": [vendor_number.strip()],
-                "vendor_name": [vendor_name.strip()],
-            }
-        )
 
     triplet = payload.get("triplet")
     if triplet:
@@ -157,15 +178,15 @@ def load_vendor_updates_from_json(json_path: Path) -> pd.DataFrame:
             number = triplet.get("vendor_number") or triplet.get("vendorNumber")
             name = triplet.get("vendor_name") or triplet.get("vendorName")
             if code and number and name:
-                return build_frame(code, str(number), name)
+                return build_vendor_frame(code, str(number), name)
         elif isinstance(triplet, (list, tuple)) and len(triplet) == 3:
             code, number, name = triplet
             if code and number and name:
-                return build_frame(str(code), str(number), str(name))
+                return build_vendor_frame(str(code), str(number), str(name))
         elif isinstance(triplet, str):
             match = pattern.search(triplet)
             if match:
-                return build_frame(match.group(1), match.group(2), match.group(3))
+                return build_vendor_frame(match.group(1), match.group(2), match.group(3))
 
     text_candidates = []
     for key in ("body", "body_text", "bodyText", "bodyPreview", "subject"):
@@ -178,7 +199,7 @@ def load_vendor_updates_from_json(json_path: Path) -> pd.DataFrame:
     for line in text_candidates:
         match = pattern.search(line)
         if match:
-            return build_frame(match.group(1), match.group(2), match.group(3))
+            return build_vendor_frame(match.group(1), match.group(2), match.group(3))
 
     raise ValueError(
         f"Unable to parse vendor details in {json_path.name}; inspected keys "
@@ -186,9 +207,66 @@ def load_vendor_updates_from_json(json_path: Path) -> pd.DataFrame:
     )
 
 
-def load_latest_vendor_json(json_dir: Path) -> pd.DataFrame:
+def parse_gl_payload(payload: dict, json_path: Path) -> pd.DataFrame:
+    """Return a DataFrame with GL details extracted from the payload."""
+    pattern = re.compile(r"([A-Za-z0-9]+)\s+([A-Za-z0-9]+)\s+([A-Za-z0-9]+)\s+(.+)")
+
+    quadruplet = payload.get("quadruplet")
+    if quadruplet:
+        if isinstance(quadruplet, dict):
+            account = quadruplet.get("account") or quadruplet.get("gl_account") or quadruplet.get("glAccount")
+            coding_block = quadruplet.get("coding_block") or quadruplet.get("codingBlock")
+            company_code = quadruplet.get("company_code") or quadruplet.get("companyCode")
+            description = quadruplet.get("description") or quadruplet.get("gl_description") or quadruplet.get("glDescription")
+            if account and coding_block and company_code and description:
+                return build_frame(str(account), str(coding_block), str(company_code), str(description))
+        elif isinstance(quadruplet, (list, tuple)) and len(quadruplet) == 4:
+            account, coding_block, company_code, description = quadruplet
+            if account and coding_block and company_code and description:
+                return build_frame(str(account), str(coding_block), str(company_code), str(description))
+        elif isinstance(quadruplet, str):
+            match = pattern.search(quadruplet)
+            if match:
+                return build_frame(match.group(1), match.group(2), match.group(3), match.group(4))
+
+    text_candidates = []
+    for key in ("body", "body_text", "bodyText", "bodyPreview", "subject"):
+        value = payload.get(key)
+        if value:
+            text_candidates.extend(
+                seg.strip() for seg in re.split(r"[\r\n]+", str(value)) if seg.strip()
+            )
+
+    for line in text_candidates:
+        match = pattern.search(line)
+        if match:
+            return build_frame(match.group(1), match.group(2), match.group(3), match.group(4))
+
+    raise ValueError(
+        f"Unable to parse GL details in {json_path.name}; inspected keys "
+        f"{[key for key in ('quadruplet', 'body', 'body_text', 'bodyText', 'bodyPreview', 'subject')]}"
+    )
+
+
+def dataframe_from_payload(payload: dict, json_path: Path) -> tuple[pd.DataFrame, str]:
+    """Return a DataFrame and payload type based on the email subject or payload hints."""
+    subject = str(payload.get("subject", "")).lower()
+    if "esker gl email" in subject:
+        return parse_gl_payload(payload, json_path), "gl"
+    if "esker vendor email" in subject:
+        return parse_vendor_payload(payload, json_path), "vendor"
+
+    if "quadruplet" in payload:
+        return parse_gl_payload(payload, json_path), "gl"
+    if "triplet" in payload:
+        return parse_vendor_payload(payload, json_path), "vendor"
+
+    raise ValueError(f"Unable to determine payload type for {json_path.name}")
+
+
+def load_latest_payload_dataframe(json_dir: Path) -> tuple[pd.DataFrame, str, Path]:
     """
-    Return the newest parsable vendor JSON payload inside the provided directory.
+    Return the newest parsable payload inside the provided directory.
 
     The environment variable `ESKER_VENDOR_JSON_PATTERN` can be used to narrow the
     filenames (e.g. ``vendor_*.json``). Files that do not match the expected schema
@@ -207,8 +285,11 @@ def load_latest_vendor_json(json_dir: Path) -> pd.DataFrame:
     errors: list[str] = []
     for json_path in json_files:
         try:
-            return load_vendor_updates_from_json(json_path)
-        except ValueError as exc:
+            with open(json_path, encoding="utf-8") as source:
+                payload = json.load(source)
+            dataframe, payload_type = dataframe_from_payload(payload, json_path)
+            return dataframe, payload_type, json_path
+        except (ValueError, json.JSONDecodeError) as exc:
             errors.append(f"{json_path.name}: {exc}")
 
     raise ValueError(
@@ -237,6 +318,11 @@ log_file = create_log_file(path_vendor_update+'Log/') # Create the log file if i
 list_company_code =[]
 list_vendor_number =[]
 """
+list_company_code: list[str] = []
+list_vendor_number: list[str] = []
+list_gl_account: list[str] = []
+list_gl_description: list[str] = []
+
 def start_time():
     start_time=datetime.now()
     return start_time
@@ -355,13 +441,116 @@ def vendor_update_process(driver, df_vendor_update):
         list_vendor_number.append(df_vendor_update.loc[i, 'vendor_number'])
         return list_vendor_number
 
-    
-def log_entry(log_file,started_time):
-    with open(log_file, 'a') as f:  # Open in append mode
+
+def gl_update_process(driver, df_gl_update: pd.DataFrame):
+    """
+    Placeholder GL update automation. Captures payload data for future implementation.
+    Returns a list of identifiers mirroring vendor_update_process for compatibility.
+    """
+    for i in range(len(df_gl_update)):
+        account = str(df_gl_update.loc[i, 'account'])
+        coding_block = str(df_gl_update.loc[i, 'coding_block'])
+        company_code = str(df_gl_update.loc[i, 'company_code'])
+        description = str(df_gl_update.loc[i, 'description'])
+
+        print(
+            f"GL update received for account {account}, coding block {coding_block}, "
+            f"company {company_code}: {description}"
+        )
+
+
+        def hover_arrow(driver, x_path):
+            elem_to_hover = driver.find_element(By.XPATH, x_path)
+            hover = ActionChains(driver).move_to_element(elem_to_hover)
+            hover.perform()
+
+        pyautogui.moveTo(35,350, duration=2) #move cursor to extreme left side
+        time.sleep(1)
+        pyautogui.click()
+
+        x_path='//*[@id="mainMenuBar"]/td/table/tbody/tr/td[31]/a/div'
+        try:
+            hover_arrow(driver, x_path)
+        except Exception as e:
+            time.sleep(0.5) 
+        pyautogui.moveTo(1690,370, duration=2.5) #arrow icon
+        time.sleep(0.5)
+        pyautogui.click()
+        time.sleep(1)
+
+        actions = ActionChains(driver)
+        actions.send_keys(Keys.TAB).perform()
+        actions.send_keys(Keys.TAB).perform()
+        actions.send_keys(Keys.TAB).perform()
+        actions.send_keys(Keys.ENTER).perform()
+
+        pyautogui.moveTo(65,475, duration=2) #move to tables_input_search_box
+        time.sleep(0.5)
+        pyautogui.click()
+        time.sleep(2)
+        pyautogui.typewrite("[Manual Import] S2P - G/L accounts")
+        actions.send_keys(Keys.ENTER)
+
+        try:                
+            pyautogui.moveTo(70,805, duration=1.5)
+            time.sleep(1)
+            pyautogui.click(button='left')                             
+        except Exception as e:
+            btn_new=driver.find_element(By.XPATH, '//*[@id="tpl_ih_adminList_CommonActionList"]/tbody/tr/td[1]/a')
+            btn_new.click()
+        time.sleep(1) 
+        
+        try:
+            pyautogui.moveTo(890,715, duration=1.5)
+            time.sleep(2.5)
+            pyautogui.click()
+        except Exception as e:
+            btn_continue=driver.find_element(By.XPATH, '//*[@id="form-container"]/div[5]/div[3]/div[2]/div[3]/a[1]')
+            btn_continue.click()
+        time.sleep(1)
+
+        pyautogui.moveTo(225,310,duration=2) #first input box
+        pyautogui.click()
+
+        pyautogui.typewrite(company_code)
+        actions.send_keys(Keys.TAB).perform()
+        pyautogui.typewrite(account)
+        actions.send_keys(Keys.TAB).perform()
+        pyautogui.typewrite(coding_block)
+        actions.send_keys(Keys.TAB).perform()
+        pyautogui.typewrite(description)
+        actions.send_keys(Keys.TAB).perform()
+        time.sleep(0.5)
+
+        pyautogui.moveTo(45,1085, duration=2) #move to Save button
+        #pyautogui.click()
+
+        list_company_code.append(company_code)
+        list_gl_account.append(account)
+        list_gl_description.append(description)
+        list_vendor_number.append(account)
+
+    return list_vendor_number
+
+
+def log_entry(log_file: str, started_time: datetime, payload_type: str) -> None:
+    """Append a summary of the automation run to the log file."""
+    with open(log_file, 'a', encoding='utf-8') as f:
         f.write(f"Process started: {started_time}\n")
+        f.write(f"Process type: {payload_type}\n")
         f.write(f"Process completed: {datetime.now()}\n")
-        f.write(f"Updated entities: {', '.join(list_company_code)}\n")
-        f.write(f"Updated vendor: {str(list_vendor_number)}\n")
+
+        if list_company_code:
+            f.write(f"Company codes: {', '.join(list_company_code)}\n")
+
+        if payload_type == "vendor" and list_vendor_number:
+            f.write(f"Vendors: {', '.join(list_vendor_number)}\n")
+        elif payload_type == "gl":
+            if list_gl_account:
+                f.write(f"GL accounts: {', '.join(list_gl_account)}\n")
+            if list_gl_description:
+                f.write(f"Descriptions: {', '.join(list_gl_description)}\n")
+
 
 
 def _bool_from_env(var_name: str, default: bool = False) -> bool:
@@ -378,13 +567,13 @@ def main(
     log_dir: Path | str | None = None,
     dry_run: bool | None = None,
 ) -> None:
-    global list_company_code, list_vendor_number
+    global list_company_code, list_vendor_number, list_gl_account, list_gl_description
 
     if mode != "worker":
         raise ValueError(f"Unsupported mode '{mode}'. Only 'worker' is implemented.")
 
     if json_dir is None:
-        json_directory = Path(os.getenv("ESKER_VENDOR_JSON_DIR", r"C:/Users/john.tan/Downloads")) #AppData/Local/Temp
+        json_directory = Path(os.getenv("ESKER_VENDOR_JSON_DIR", r"C:/Users/john.tan/Downloads"))  # AppData/Local/Temp
     else:
         json_directory = Path(json_dir)
 
@@ -396,42 +585,53 @@ def main(
     use_dry_run = dry_run if dry_run is not None else _bool_from_env("ESKER_DRYRUN", default=False)
     list_company_code = []
     list_vendor_number = []
+    list_gl_account = []
+    list_gl_description = []
+
     started_time = start_time()
     print(started_time)
 
+    log_file = create_log_file(str(log_directory))
+
     if use_dry_run:
-        log_file = create_log_file(str(log_directory))
         print("Dry-run enabled; skipping Selenium automation.")
-        log_entry(log_file, started_time)
+        log_entry(log_file, started_time, "dry-run")
         print("Process completed (dry-run).")
         time.sleep(1)
         return
 
-    vendor_update = load_latest_vendor_json(json_directory)
-    df_vendor_update = format_vendor_data(vendor_update)
-    log_file = create_log_file(str(log_directory))
+    payload_df, payload_type, payload_path = load_latest_payload_dataframe(json_directory)
+    if payload_type == "vendor":
+        df_payload = format_vendor_data(payload_df)
+    else:
+        df_payload = format_gl_data(payload_df)
+
+    print(f"Processing {payload_type} payload from {payload_path.name}")
 
     driver = create_driver()
     try:
         login_esker(driver)
 
-        x_path_hover = '//*[@id="mainMenuBar"]/td/table/tbody/tr/td[36]/a/div'
-        hover_arrow(driver, x_path_hover)
+        if payload_type == "vendor":
+            x_path_hover = '//*[@id="mainMenuBar"]/td/table/tbody/tr/td[36]/a/div'
+            hover_arrow(driver, x_path_hover)
 
-        try:
-            tables = driver.find_element(By.XPATH, '//*[@id="CUSTOMTABLE_TAB_100872176"]')
-            tables.click()
+            try:
+                tables = driver.find_element(By.XPATH, '//*[@id="CUSTOMTABLE_TAB_100872176"]')
+                tables.click()
+                time.sleep(1)
+            except Exception as e:
+                print(e)
             time.sleep(1)
-        except Exception as e:
-            print(e)
-        time.sleep(1)
 
-        vendor_update_process(driver, df_vendor_update)
-        time.sleep(2)
+            vendor_update_process(driver, df_payload)
+            time.sleep(2)
+        else:
+            gl_update_process(driver, df_payload)
     finally:
         driver.quit()
 
-    log_entry(log_file, started_time)
+    log_entry(log_file, started_time, payload_type)
     print("Process completed.")
     time.sleep(1)
 
