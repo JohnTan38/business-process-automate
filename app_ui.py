@@ -23,12 +23,12 @@ def create_driver():
 
 def login_esker(driver):
     #driver = webdriver.Chrome()
-    driver.get("https://az3.ondemand.e@@@r.com/ondemand/webaccess/asf/home.aspx")
+    driver.get("https://az3.ondemand.esker.com/ondemand/webaccess/asf/home.aspx")
     driver.maximize_window()
     time.sleep(1)
 
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@EMAIL.com.sg")
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("YOUR_PASSWORD")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@sh-cogent.com.sg")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("Esker3838")
     driver.find_element(By.XPATH, '//*[@id="ctl03_btnSubmitLogin"]').click()
     time.sleep(2)
     #return driver
@@ -320,6 +320,7 @@ list_vendor_number =[]
 """
 list_company_code: list[str] = []
 list_vendor_number: list[str] = []
+list_vendor_name: list[str] = []
 list_gl_account: list[str] = []
 list_gl_description: list[str] = []
 
@@ -341,14 +342,23 @@ def vendor_update_process(driver, df_vendor_update):
         time.sleep(1)
         pyautogui.click()
         #pyautogui.typewrite('S2P - Vendors')
-        
+
         try:
-            #s2p_vendors=driver.find_element(By.XPATH, '//*[@id="ViewSelector"]/div/div/div/div[1]/div[1]/span')
-            #s2p_vendors.click()
+            pyautogui.moveTo(65,475, duration=2) #move to tables_input_search_box
+            time.sleep(0.5)
+            pyautogui.click()
             time.sleep(1)
+            pyautogui.typewrite("S2P - Vendors")
+            time.sleep(2.5)
+            actions.send_keys(Keys.ENTER)
         except Exception as e:
             time.sleep(0.5)
-        
+            #print(f"search box not found: {e}")
+            
+            time.sleep(1)
+            #s2p_vendors=driver.find_element(By.XPATH, '//*[@id="ViewSelector"]/div/div/div/div[1]/div[1]/span')
+            #s2p_vendors.click()
+                
         try:                
                 pyautogui.moveTo(70,805, duration=1.5)
                 time.sleep(1.5)
@@ -360,7 +370,7 @@ def vendor_update_process(driver, df_vendor_update):
         time.sleep(2)
         try:
             pyautogui.moveTo(890,715, duration=1.5)
-            time.sleep(3.5)
+            time.sleep(2)
             pyautogui.click()
         except Exception as e:
             btn_continue=driver.find_element(By.XPATH, '//*[@id="form-container"]/div[5]/div[3]/div[2]/div[3]/a[1]')
@@ -439,6 +449,7 @@ def vendor_update_process(driver, df_vendor_update):
 
         list_company_code.append(df_vendor_update.loc[i, 'company_code'])
         list_vendor_number.append(df_vendor_update.loc[i, 'vendor_number'])
+        list_vendor_name.append(df_vendor_update.loc[i, 'vendor_name'])
         return list_vendor_number
 
 
@@ -523,7 +534,8 @@ def gl_update_process(driver, df_gl_update: pd.DataFrame):
         time.sleep(0.5)
 
         pyautogui.moveTo(45,1085, duration=2) #move to Save button
-        #pyautogui.click()
+        time.sleep(1.5)
+        pyautogui.click()
 
         list_company_code.append(company_code)
         list_gl_account.append(account)
@@ -541,15 +553,16 @@ def log_entry(log_file: str, started_time: datetime, payload_type: str) -> None:
         f.write(f"Process completed: {datetime.now()}\n")
 
         if list_company_code:
-            f.write(f"Company codes: {', '.join(list_company_code)}\n")
+            f.write(f"Company codes: {', '.join(map(str, list_company_code))}\n")
 
         if payload_type == "vendor" and list_vendor_number:
-            f.write(f"Vendors: {', '.join(list_vendor_number)}\n")
+            f.write(f"Vendors: {', '.join(map(str, list_vendor_number))}\n")
+            f.write(f"Vendor names: {', '.join(map(str, list_vendor_name))}\n")
         elif payload_type == "gl":
             if list_gl_account:
-                f.write(f"GL accounts: {', '.join(list_gl_account)}\n")
+                f.write(f"GL accounts: {', '.join(map(str, list_gl_account))}\n")
             if list_gl_description:
-                f.write(f"Descriptions: {', '.join(list_gl_description)}\n")
+                f.write(f"Descriptions: {', '.join(map(str, list_gl_description))}\n")
 
 
 
