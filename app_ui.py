@@ -14,6 +14,8 @@ import shutil
 import argparse
 import sys
 
+from functools import lru_cache
+
 def create_driver():
     options = webdriver.ChromeOptions()
     service = Service(log_path=os.devnull)
@@ -23,12 +25,12 @@ def create_driver():
 
 def login_esker(driver):
     #driver = webdriver.Chrome()
-    driver.get("https://az3.ondemand.esker.com/ondemand/webaccess/asf/home.aspx")
+    driver.get("https://az3.ondemand.e@@@r.com/ondemand/webaccess/asf/home.aspx")
     driver.maximize_window()
     time.sleep(1)
 
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@sh-cogent.com.sg")
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("Esker3838")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@email.com")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("YOUR_PASSWORD")
     driver.find_element(By.XPATH, '//*[@id="ctl03_btnSubmitLogin"]').click()
     time.sleep(2)
     #return driver
@@ -146,30 +148,61 @@ def format_gl_data(df_gl_update: pd.DataFrame) -> pd.DataFrame:
     df_gl_update.fillna("", inplace=True)
     return df_gl_update
 
+_CODE_SPLIT_PATTERN = re.compile(r"\s*;\s*")
+
+
+def _normalize_company_codes(value) -> list[str]:
+    """Return a list of company codes from a string or iterable."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        codes: list[str] = []
+        for item in value:
+            codes.extend(_normalize_company_codes(item))
+        return [code for code in codes if code]
+    text = str(value).strip()
+    if not text:
+        return []
+    return [code.strip() for code in _CODE_SPLIT_PATTERN.split(text) if code.strip()]
+
 def build_vendor_frame(company_code: str, vendor_number: str, vendor_name: str) -> pd.DataFrame:
+    codes = _normalize_company_codes(company_code)
+    if not codes:
+        raise ValueError("Vendor payload missing company_code.")
+    vendor_number_str = "" if vendor_number is None else str(vendor_number).strip()
+    vendor_name_str = "" if vendor_name is None else str(vendor_name).strip()
     return pd.DataFrame(
         {
-            "company_code": [company_code.strip()],
-            "vendor_number": [vendor_number.strip()],
-            "vendor_name": [vendor_name.strip()],
+            "company_code": codes,
+            "vendor_number": [vendor_number_str] * len(codes),
+            "vendor_name": [vendor_name_str] * len(codes),
         }
     )
 
 
 def build_frame(account: str, coding_block: str, company_code: str, description: str) -> pd.DataFrame:
+    codes = _normalize_company_codes(company_code)
+    if not codes:
+        raise ValueError("GL payload missing company_code.")
+    account_str = "" if account is None else str(account).strip()
+    coding_block_str = "" if coding_block is None else str(coding_block).strip()
+    description_str = "" if description is None else str(description).strip()
     return pd.DataFrame(
         {
-            "account": [account.strip()],
-            "coding_block": [coding_block.strip()],
-            "company_code": [company_code.strip()],
-            "description": [description.strip()],
+            "account": [account_str] * len(codes),
+            "coding_block": [coding_block_str] * len(codes),
+            "company_code": codes,
+            "description": [description_str] * len(codes),
         }
     )
 
 
 def parse_vendor_payload(payload: dict, json_path: Path) -> pd.DataFrame:
     """Return a DataFrame with vendor details extracted from the payload."""
-    pattern = re.compile(r"([A-Za-z0-9]+)\s+(\d+)\s+(.+)")
+    pattern = re.compile(
+        r"^\s*([A-Za-z0-9]+(?:\s*;\s*[A-Za-z0-9]+)*)\s+([A-Za-z0-9]+)\s+(.+?)\s*$"
+    )
+    frames: list[pd.DataFrame] = []
 
     triplet = payload.get("triplet")
     if triplet:
@@ -178,28 +211,44 @@ def parse_vendor_payload(payload: dict, json_path: Path) -> pd.DataFrame:
             number = triplet.get("vendor_number") or triplet.get("vendorNumber")
             name = triplet.get("vendor_name") or triplet.get("vendorName")
             if code and number and name:
-                return build_vendor_frame(code, str(number), name)
-        elif isinstance(triplet, (list, tuple)) and len(triplet) == 3:
-            code, number, name = triplet
-            if code and number and name:
-                return build_vendor_frame(str(code), str(number), str(name))
+                frames.append(build_vendor_frame(code, str(number), name))
+        elif isinstance(triplet, (list, tuple)):
+            if len(triplet) == 3 and not any(isinstance(item, (list, tuple, dict)) for item in triplet):
+                code, number, name = triplet
+                if code and number and name:
+                    frames.append(build_vendor_frame(str(code), str(number), str(name)))
+            else:
+                for item in triplet:
+                    try:
+                        frames.append(parse_vendor_payload({"triplet": item}, json_path))
+                    except ValueError:
+                        continue
         elif isinstance(triplet, str):
-            match = pattern.search(triplet)
+            match = pattern.match(triplet)
             if match:
-                return build_vendor_frame(match.group(1), match.group(2), match.group(3))
+                frames.append(build_vendor_frame(match.group(1), match.group(2), match.group(3)))
+        if frames:
+            return pd.concat(frames, ignore_index=True)
 
-    text_candidates = []
-    for key in ("body", "body_text", "bodyText", "bodyPreview", "subject"):
+    for key in ("body", "body_text", "bodyText", "bodyPreview"):
         value = payload.get(key)
-        if value:
-            text_candidates.extend(
-                seg.strip() for seg in re.split(r"[\r\n]+", str(value)) if seg.strip()
-            )
+        if not value:
+            continue
+        for line in (seg.strip() for seg in re.split(r"[\r\n]+", str(value)) if seg.strip()):
+            match = pattern.match(line)
+            if match:
+                frames.append(build_vendor_frame(match.group(1), match.group(2), match.group(3)))
+    if frames:
+        return pd.concat(frames, ignore_index=True)
 
-    for line in text_candidates:
-        match = pattern.search(line)
-        if match:
-            return build_vendor_frame(match.group(1), match.group(2), match.group(3))
+    subject_value = payload.get("subject")
+    if subject_value:
+        for line in (seg.strip() for seg in re.split(r"[\r\n]+", str(subject_value)) if seg.strip()):
+            match = pattern.match(line)
+            if match:
+                frames.append(build_vendor_frame(match.group(1), match.group(2), match.group(3)))
+    if frames:
+        return pd.concat(frames, ignore_index=True)
 
     raise ValueError(
         f"Unable to parse vendor details in {json_path.name}; inspected keys "
@@ -209,38 +258,101 @@ def parse_vendor_payload(payload: dict, json_path: Path) -> pd.DataFrame:
 
 def parse_gl_payload(payload: dict, json_path: Path) -> pd.DataFrame:
     """Return a DataFrame with GL details extracted from the payload."""
-    pattern = re.compile(r"([A-Za-z0-9]+)\s+([A-Za-z0-9]+)\s+([A-Za-z0-9]+)\s+(.+)")
+    pattern_full = re.compile(
+        r"^\s*([A-Za-z0-9]*\d[A-Za-z0-9]*)\s+([A-Za-z0-9]+)\s+([A-Za-z0-9]+(?:\s*;\s*[A-Za-z0-9]+)*)\s+(.+?)\s*$"
+    )
+    pattern_partial = re.compile(
+        r"^\s*([A-Za-z0-9]*\d[A-Za-z0-9]*)\s+([A-Za-z0-9]+(?:\s*;\s*[A-Za-z0-9]+)*)\s+(.+?)\s*$"
+    )
+
+    def frame_from_string(value: str) -> pd.DataFrame | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        match_full = pattern_full.match(text)
+        if match_full:
+            return build_frame(
+                match_full.group(1),
+                match_full.group(2),
+                match_full.group(3),
+                match_full.group(4),
+            )
+        match_partial = pattern_partial.match(text)
+        if match_partial:
+            return build_frame(
+                match_partial.group(1),
+                "",
+                match_partial.group(2),
+                match_partial.group(3),
+            )
+        return None
 
     quadruplet = payload.get("quadruplet")
     if quadruplet:
         if isinstance(quadruplet, dict):
             account = quadruplet.get("account") or quadruplet.get("gl_account") or quadruplet.get("glAccount")
-            coding_block = quadruplet.get("coding_block") or quadruplet.get("codingBlock")
-            company_code = quadruplet.get("company_code") or quadruplet.get("companyCode")
-            description = quadruplet.get("description") or quadruplet.get("gl_description") or quadruplet.get("glDescription")
-            if account and coding_block and company_code and description:
-                return build_frame(str(account), str(coding_block), str(company_code), str(description))
-        elif isinstance(quadruplet, (list, tuple)) and len(quadruplet) == 4:
-            account, coding_block, company_code, description = quadruplet
-            if account and coding_block and company_code and description:
-                return build_frame(str(account), str(coding_block), str(company_code), str(description))
-        elif isinstance(quadruplet, str):
-            match = pattern.search(quadruplet)
-            if match:
-                return build_frame(match.group(1), match.group(2), match.group(3), match.group(4))
-
-    text_candidates = []
-    for key in ("body", "body_text", "bodyText", "bodyPreview", "subject"):
-        value = payload.get(key)
-        if value:
-            text_candidates.extend(
-                seg.strip() for seg in re.split(r"[\r\n]+", str(value)) if seg.strip()
+            coding_block = (
+                quadruplet.get("coding_block")
+                or quadruplet.get("codingBlock")
+                or ""
             )
+            company_code = quadruplet.get("company_code") or quadruplet.get("companyCode")
+            description = (
+                quadruplet.get("description")
+                or quadruplet.get("gl_description")
+                or quadruplet.get("glDescription")
+            )
+            if account and company_code and description:
+                return build_frame(
+                    str(account),
+                    str(coding_block),
+                    str(company_code),
+                    str(description),
+                )
+        elif isinstance(quadruplet, (list, tuple)):
+            if len(quadruplet) == 4:
+                account, coding_block, company_code, description = quadruplet
+                if account and company_code and description:
+                    return build_frame(
+                        str(account),
+                        str(coding_block or ""),
+                        str(company_code),
+                        str(description),
+                    )
+            elif len(quadruplet) == 3:
+                account, company_code, description = quadruplet
+                if account and company_code and description:
+                    return build_frame(
+                        str(account),
+                        "",
+                        str(company_code),
+                        str(description),
+                    )
+        elif isinstance(quadruplet, str):
+            frame = frame_from_string(quadruplet)
+            if frame is not None:
+                return frame
 
-    for line in text_candidates:
-        match = pattern.search(line)
-        if match:
-            return build_frame(match.group(1), match.group(2), match.group(3), match.group(4))
+    frames: list[pd.DataFrame] = []
+    for key in ("body", "body_text", "bodyText", "bodyPreview"):
+        value = payload.get(key)
+        if not value:
+            continue
+        for line in (seg.strip() for seg in re.split(r"[\r\n]+", str(value)) if seg.strip()):
+            frame = frame_from_string(line)
+            if frame is not None:
+                frames.append(frame)
+    if frames:
+        return pd.concat(frames, ignore_index=True)
+
+    subject_value = payload.get("subject")
+    if subject_value:
+        for line in (seg.strip() for seg in re.split(r"[\r\n]+", str(subject_value)) if seg.strip()):
+            frame = frame_from_string(line)
+            if frame is not None:
+                frames.append(frame)
+    if frames:
+        return pd.concat(frames, ignore_index=True)
 
     raise ValueError(
         f"Unable to parse GL details in {json_path.name}; inspected keys "
@@ -324,6 +436,97 @@ list_vendor_name: list[str] = []
 list_gl_account: list[str] = []
 list_gl_description: list[str] = []
 
+
+def _format_unique(values: list[str]) -> str:
+    """Return space-separated unique values preserving the original order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return " ".join(ordered)
+
+
+MASTER_SOURCE_DIR = Path(r"C:/Users/john.tan/Downloads")
+MASTER_FILES = {
+    "vendor": MASTER_SOURCE_DIR / "master_vendor.txt",
+    "gl": MASTER_SOURCE_DIR / "master_gl.txt",
+}
+
+
+def _normalise_token(value: str) -> str:
+    return " ".join(str(value or "").strip().split()).upper()
+
+
+@lru_cache(maxsize=None)
+def _load_master_entries(kind: str) -> set[str]:
+    path = MASTER_FILES.get(kind)
+    if not path:
+        return set()
+    try:
+        with path.open(encoding="utf-8") as handle:
+            return {
+                " ".join(line.strip().upper().split())
+                for line in handle
+                if line.strip()
+            }
+    except FileNotFoundError:
+        print(f"[warning] Master file for {kind} not found at {path}; treating as empty.")
+        return set()
+
+
+def _vendor_signature(row) -> str:
+    return " ".join(
+        filter(
+            None,
+            [
+                _normalise_token(row.get("company_code", "")),
+                _normalise_token(row.get("vendor_number", "")),
+                _normalise_token(row.get("vendor_name", "")),
+            ],
+        )
+    )
+
+
+def _gl_signature(row) -> str:
+    tokens = [
+        _normalise_token(row.get("account", "")),
+    ]
+    coding = _normalise_token(row.get("coding_block", ""))
+    if coding:
+        tokens.append(coding)
+    tokens.append(_normalise_token(row.get("company_code", "")))
+    tokens.append(_normalise_token(row.get("description", "")))
+    return " ".join(filter(None, tokens))
+
+
+def _filter_against_master(df: pd.DataFrame, payload_type: str) -> pd.DataFrame:
+    master_entries = _load_master_entries(payload_type)
+    if not master_entries:
+        return df
+
+    signatures: list[str] = []
+    for _, row in df.iterrows():
+        if payload_type == "vendor":
+            signatures.append(_vendor_signature(row))
+        else:
+            signatures.append(_gl_signature(row))
+
+    keep_indices = [sig not in master_entries for sig in signatures]
+    if not any(keep_indices):
+        return df.iloc[0:0].copy()
+
+    filtered = df.loc[keep_indices].copy()
+    filtered.reset_index(drop=True, inplace=True)
+    dropped = len(df) - len(filtered)
+    if dropped:
+        print(f"[info] Skipped {dropped} existing {payload_type} entries found in master list.")
+    return filtered
+
+
 def start_time():
     start_time=datetime.now()
     return start_time
@@ -342,6 +545,7 @@ def vendor_update_process(driver, df_vendor_update):
         time.sleep(1)
         pyautogui.click()
         #pyautogui.typewrite('S2P - Vendors')
+        actions = ActionChains(driver)
 
         try:
             pyautogui.moveTo(65,475, duration=2) #move to tables_input_search_box
@@ -350,7 +554,7 @@ def vendor_update_process(driver, df_vendor_update):
             time.sleep(1)
             pyautogui.typewrite("S2P - Vendors")
             time.sleep(2.5)
-            actions.send_keys(Keys.ENTER)
+            actions.send_keys(Keys.ENTER).perform()
         except Exception as e:
             time.sleep(0.5)
             #print(f"search box not found: {e}")
@@ -361,8 +565,9 @@ def vendor_update_process(driver, df_vendor_update):
                 
         try:                
                 pyautogui.moveTo(70,805, duration=1.5)
-                time.sleep(1.5)
-                pyautogui.click(button='left')                             
+                time.sleep(1.0)
+                pyautogui.click(button='left')
+                time.sleep(1)                          
         except Exception as e:
                 btn_new=driver.find_element(By.XPATH, '//*[@id="tpl_ih_adminList_CommonActionList"]/tbody/tr/td[1]/a')
                 btn_new.click()
@@ -450,7 +655,8 @@ def vendor_update_process(driver, df_vendor_update):
         list_company_code.append(df_vendor_update.loc[i, 'company_code'])
         list_vendor_number.append(df_vendor_update.loc[i, 'vendor_number'])
         list_vendor_name.append(df_vendor_update.loc[i, 'vendor_name'])
-        return list_vendor_number
+
+    return list_vendor_number
 
 
 def gl_update_process(driver, df_gl_update: pd.DataFrame):
@@ -500,7 +706,7 @@ def gl_update_process(driver, df_gl_update: pd.DataFrame):
         pyautogui.click()
         time.sleep(2)
         pyautogui.typewrite("[Manual Import] S2P - G/L accounts")
-        actions.send_keys(Keys.ENTER)
+        actions.send_keys(Keys.ENTER).perform()
 
         try:                
             pyautogui.moveTo(70,805, duration=1.5)
@@ -553,7 +759,7 @@ def log_entry(log_file: str, started_time: datetime, payload_type: str) -> None:
         f.write(f"Process completed: {datetime.now()}\n")
 
         if list_company_code:
-            f.write(f"Company codes: {', '.join(map(str, list_company_code))}\n")
+            f.write(f"Company codes: {_format_unique(list_company_code)}\n")
 
         if payload_type == "vendor" and list_vendor_number:
             f.write(f"Vendors: {', '.join(map(str, list_vendor_number))}\n")
@@ -618,6 +824,14 @@ def main(
         df_payload = format_vendor_data(payload_df)
     else:
         df_payload = format_gl_data(payload_df)
+
+    df_payload = _filter_against_master(df_payload, payload_type)
+    if df_payload.empty:
+        print(f"No new {payload_type} entries detected; skipping automation run.")
+        log_entry(log_file, started_time, payload_type)
+        print("Process completed (no automation required).")
+        time.sleep(1)
+        return
 
     print(f"Processing {payload_type} payload from {payload_path.name}")
 
