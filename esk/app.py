@@ -59,12 +59,12 @@ username=get_username()  # Call the function to get the username
 
 
 driver = webdriver.Chrome()
-driver.get("https://az3.ondemand.esker.com/ondemand/webaccess/asf/home.aspx")
+driver.get("https://az3.ondemand.e@@@@.com/ondemand/webaccess/asf/home.aspx")
 driver.maximize_window()
 time.sleep(1)
 
-driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@sh-cogent.com.sg")
-driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("Esker3838")
+driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("user.name@email.com.sg")
+driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("YOUR_PASSWORD")
 driver.find_element(By.XPATH, '//*[@id="ctl03_btnSubmitLogin"]').click()
 time.sleep(3) # login
 
@@ -597,10 +597,25 @@ def invoice_download_code():
     if 'invoice' not in df_invoice_user_input.columns:
         raise KeyError(f"'invoice' column is missing in worksheet '{source_sheet}' from '{source_path}'.")
 
+    def normalize_invoice_value(value):
+        if pd.isna(value):
+            return ""
+
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return ""
+
+        if '.' in text:
+            integer_part, decimal_part = text.split('.', 1)
+            if decimal_part.strip('0') == "" and integer_part.replace('-', '').isdigit():
+                return integer_part
+
+        return text
+
     df_invoice_user_input = (
         df_invoice_user_input
         .dropna(subset=['invoice'])
-        .assign(invoice=lambda df: df['invoice'].astype(str).str.strip())
+        .assign(invoice=lambda df: df['invoice'].apply(normalize_invoice_value))
     )
     df_invoice_user_input = df_invoice_user_input[df_invoice_user_input['invoice'] != ""]
 
@@ -838,7 +853,7 @@ def invoice_download_code():
 
         try:
 
-            pyautogui.moveTo(390,1030, duration=1.5) #Quit btn after multi-page download
+            pyautogui.moveTo(270,695, duration=1.5) #Quit btn after multi-page download
             pyautogui.click(button='left')
         except Exception as e:
             print(e)
