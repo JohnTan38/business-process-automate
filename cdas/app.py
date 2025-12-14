@@ -9,7 +9,7 @@ from selenium.webdriver.common.keys import Keys
 import time, os
 
 driver = webdriver.Chrome()
-#driver.get("https://az3.ondemand.esker.com/ondemand/webaccess/asf/home.aspx")
+#driver.get("https://az3.ondemand.e@@@@.com/ondemand/webaccess/asf/home.aspx")
 driver.get("https://invoice.eservices.c@@@.link/login")
 driver.maximize_window()
 time.sleep(3)
@@ -677,4 +677,5 @@ if __name__ == '__main__':
     write_log(f"bill ref saved: {(list_bill_ref_saved)}")
     write_log(f"completed {datetime.now().strftime('%Y%m%d %H:%M:%S')} ...")
     #driver.quit()
+
 
