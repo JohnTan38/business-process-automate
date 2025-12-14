@@ -13,8 +13,46 @@ import subprocess
 import shutil
 import argparse
 import sys
+from pathlib import Path
 
 from functools import lru_cache
+
+def _load_env_file_best_effort(path: Path) -> None:
+    """Best-effort .env loader (no override)."""
+    try:
+        if not path.exists():
+            return
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if (
+                len(value) >= 2
+                and (value[0] == value[-1])
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        return
+
+
+def _load_repo_dotenv_best_effort() -> None:
+    """Load repo root .env so worker flags apply even outside Flask."""
+    repo_env = Path(__file__).resolve().parents[1] / ".env"
+    try:
+        from dotenv import load_dotenv  # type: ignore
+
+        load_dotenv(dotenv_path=repo_env, override=False)
+    except Exception:
+        _load_env_file_best_effort(repo_env)
+
+
+_load_repo_dotenv_best_effort()
 
 def create_driver():
     options = webdriver.ChromeOptions()
@@ -25,12 +63,12 @@ def create_driver():
 
 def login_esker(driver):
     #driver = webdriver.Chrome()
-    driver.get("https://az3.ondemand.e@@@r.com/ondemand/webaccess/asf/home.aspx")
+    driver.get("https://az3.ondemand.esker.com/ondemand/webaccess/asf/home.aspx")
     driver.maximize_window()
     time.sleep(1)
 
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@email.com")
-    driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("YOUR_PASSWORD")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@sh-cogent.com.sg")
+    driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("Esker3838")
     driver.find_element(By.XPATH, '//*[@id="ctl03_btnSubmitLogin"]').click()
     time.sleep(2)
     #return driver
@@ -60,7 +98,6 @@ time.sleep(1)
 """
 
 import pyautogui  #20251002 great! #2
-from pathlib import Path
 import win32com.client  #esker vendor update Great 20241129!
 import time #create inbox subfolder, download attachments, move email to subfolder.
 import re
@@ -785,6 +822,8 @@ def main(
     json_dir: Path | str | None = None,
     log_dir: Path | str | None = None,
     dry_run: bool | None = None,
+    skip_master: bool | None = None,
+    force_run: bool | None = None,
 ) -> None:
     global list_company_code, list_vendor_number, list_gl_account, list_gl_description
 
@@ -802,6 +841,8 @@ def main(
         log_directory = Path(log_dir)
 
     use_dry_run = dry_run if dry_run is not None else _bool_from_env("ESKER_DRYRUN", default=False)
+    use_skip_master = skip_master if skip_master is not None else _bool_from_env("ESKER_SKIP_MASTER", default=False)
+    use_force_run = force_run if force_run is not None else _bool_from_env("ESKER_FORCE_RUN", default=False)
     list_company_code = []
     list_vendor_number = []
     list_gl_account = []
@@ -825,13 +866,25 @@ def main(
     else:
         df_payload = format_gl_data(payload_df)
 
-    df_payload = _filter_against_master(df_payload, payload_type)
-    if df_payload.empty:
-        print(f"No new {payload_type} entries detected; skipping automation run.")
-        log_entry(log_file, started_time, payload_type)
-        print("Process completed (no automation required).")
-        time.sleep(1)
-        return
+    df_to_process = df_payload
+    if use_skip_master:
+        print("[info] ESKER_SKIP_MASTER enabled; running without master list filtering.")
+    else:
+        df_to_process = _filter_against_master(df_payload, payload_type)
+
+    if df_to_process.empty:
+        if use_force_run and not df_payload.empty:
+            print(
+                f"[info] ESKER_FORCE_RUN enabled; running automation even though no new {payload_type} entries "
+                "were detected after master list filtering."
+            )
+            df_to_process = df_payload
+        else:
+            print(f"No new {payload_type} entries detected; skipping automation run.")
+            log_entry(log_file, started_time, payload_type)
+            print("Process completed (no automation required).")
+            time.sleep(1)
+            return
 
     print(f"Processing {payload_type} payload from {payload_path.name}")
 
@@ -851,10 +904,10 @@ def main(
                 print(e)
             time.sleep(1)
 
-            vendor_update_process(driver, df_payload)
+            vendor_update_process(driver, df_to_process)
             time.sleep(2)
         else:
-            gl_update_process(driver, df_payload)
+            gl_update_process(driver, df_to_process)
     finally:
         driver.quit()
 
@@ -893,7 +946,33 @@ def _main_cli(argv: list[str] | None = None) -> None:
         action="store_false",
         help="Force disable dry-run mode even if the environment variable is set.",
     )
+    parser.add_argument(
+        "--skip-master",
+        dest="skip_master",
+        action="store_true",
+        help="Skip filtering against the master list (also via ESKER_SKIP_MASTER=1).",
+    )
+    parser.add_argument(
+        "--no-skip-master",
+        dest="skip_master",
+        action="store_false",
+        help="Force enable master list filtering even if the environment variable is set.",
+    )
+    parser.add_argument(
+        "--force-run",
+        dest="force_run",
+        action="store_true",
+        help="Run Selenium even if the master filter removes all rows (also via ESKER_FORCE_RUN=1).",
+    )
+    parser.add_argument(
+        "--no-force-run",
+        dest="force_run",
+        action="store_false",
+        help="Do not force Selenium runs even if the environment variable is set.",
+    )
     parser.set_defaults(dry_run=None)
+    parser.set_defaults(skip_master=None)
+    parser.set_defaults(force_run=None)
 
     args = parser.parse_args(argv)
 
@@ -903,6 +982,8 @@ def _main_cli(argv: list[str] | None = None) -> None:
             json_dir=args.json_dir,
             log_dir=args.log_dir,
             dry_run=args.dry_run,
+            skip_master=args.skip_master,
+            force_run=args.force_run,
         )
     except Exception as exc:  # pragma: no cover - CLI entry point
         raise SystemExit(f"Error: {exc}") from exc

@@ -14,6 +14,40 @@ from pathlib import Path
 import pythoncom
 import win32com.client
 
+def _load_env_file_best_effort(path: Path) -> None:
+    """Best-effort .env loader (no override) to keep scheduled tasks reliable."""
+    try:
+        if not path.exists():
+            return
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if (
+                len(value) >= 2
+                and (value[0] == value[-1])
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        # Never fail listener startup due to .env parsing.
+        return
+
+
+# Load optional env flags from the repo root (.env) for scheduler-friendly configuration.
+_repo_env = Path(__file__).resolve().parents[1] / ".env"
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    load_dotenv(dotenv_path=_repo_env, override=False)
+except Exception:
+    _load_env_file_best_effort(_repo_env)
+
 # --- CONFIG ---
 PYTHON_EXE = sys.executable  # uses current venv/interpreter
 APP_PY     = r"C:/Users/john.tan/esker/Scripts/app.py" # <-- adjust if needed
