@@ -59,12 +59,12 @@ username=get_username()  # Call the function to get the username
 
 
 driver = webdriver.Chrome()
-driver.get("https://az3.ondemand.esker.com/ondemand/webaccess/asf/home.aspx")
+driver.get("https://az3.ondemand.e@222.com/ondemand/webaccess/asf/home.aspx")
 driver.maximize_window()
 time.sleep(1)
 
-driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("john.tan@sh-cogent.com.sg")
-driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("Esker3838")
+driver.find_element(By.XPATH, '//*[@id="ctl03_tbUser"]').send_keys("user.name@email.com.sg")
+driver.find_element(By.XPATH, '//*[@id="ctl03_tbPassword"]').send_keys("PASSWORD")
 driver.find_element(By.XPATH, '//*[@id="ctl03_btnSubmitLogin"]').click()
 time.sleep(3) # login
 
@@ -1057,4 +1057,5 @@ def invoice_download_code():
 
 if __name__ == "__main__":
     main()
+
 
